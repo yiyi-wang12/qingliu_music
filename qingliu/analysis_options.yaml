@@ -1,0 +1,8 @@
+# 不引入 flutter_lints，保持分析器安静；构建 APK 不受影响。
+analyzer:
+  errors:
+    deprecated_member_use: ignore
+    deprecated_member_use_from_same_package: ignore
+  exclude:
+    - build/**
+    - android/**

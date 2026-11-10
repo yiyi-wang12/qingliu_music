@@ -1,0 +1,50 @@
+# ============================================================
+# 清流音乐 · 发布用忽略规则
+# 只提交代码：媒体文件、运行期数据、构建产物都不入库
+# ============================================================
+
+# ---- 本地媒体资源：体积大 + 版权，绝对不要提交 ----
+server/music/*
+server/lrc/*
+server/images/*
+
+# ---- 运行期数据：含签名密钥、密码哈希、个人收藏 ----
+server/setting.json
+server/user.json
+server/library.json
+server/*.json.tmp
+server/*.json.bak
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ---- 构建产物 / 依赖缓存 ----
+*.apk
+*.aab
+qingliu/build/
+qingliu/.dart_tool/
+qingliu/.flutter-plugins-dependencies
+qingliu/android/.gradle/
+qingliu/android/app/debug/
+qingliu/android/app/profile/
+qingliu/android/app/release/
+qingliu/android/local.properties
+qingliu/android/key.properties
+qingliu/android/**/*.jks
+qingliu/android/**/*.keystore
+qingliu/ios/Pods/
+qingliu/ios/.symlinks/
+
+# ---- 工具与系统垃圾 ----
+.workbuddy/
+打包APK.md
+.idea/
+.vscode/
+*.iml
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
