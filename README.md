@@ -271,25 +271,3 @@ qingliu/android/app/src/main/kotlin/com/yiyiwang12/qingyunmusic/
 ## 许可证
 
 本项目以 **GNU General Public License v3.0** 发布，许可证全文见 [LICENSE](LICENSE)。
-
-```
-清流音乐 — 局域网音乐播放器
-Copyright (C) 2026 yiyi-wang12
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-```
-
-简单说：
-
-- 可以自由使用、修改、分发，包括商业用途
-- 分发修改后的版本或编译好的 APK 时，**必须同样以 GPL-3.0 开放对应源码**，并保留版权声明与本免责声明
-- 本软件不提供任何担保；因使用产生的风险由使用者承担
-- 本许可证只覆盖代码，**不覆盖任何音乐、歌词、封面内容**（这些内容不在本仓库中）
