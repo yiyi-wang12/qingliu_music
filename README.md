@@ -242,20 +242,6 @@ qingliu/android/app/src/main/kotlin/com/yiyiwang12/qingyunmusic/
   MediaPlaybackService.kt 播放期间的前台服务
 ```
 
----
-
-## 三、已知坑
-
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| Gradle 报 `project path contains non-ASCII characters` | 工程路径含中文 | 放在纯 ASCII 路径下构建 |
-| 手机连不上 / 报 network error | 防火墙、明文 HTTP、不同网段 | 放行专用网络；确认 `usesCleartextTraffic="true"` 在清单里 |
-| 改了 `main.py` 行为没变 | 旧进程仍占端口 | `netstat -ano \| findstr :8080` 查 PID 后 taskkill |
-| 构建报 NDK 缺失 | 需要 NDK `28.2.13676358` | 在 Android SDK Manager 里装对应版本 |
-| 歌词整体偏移 | 行高与滚动偏移不匹配 | 用固定行高 `itemExtent`，偏移 = `index × 行高`，当前行居中 |
-
----
-
 ## 免责声明与版权
 
 本软件为局域网音乐播放工具，仅提供音乐文件的扫描、传输与播放功能，**不提供、不内置、不分发任何音乐作品、歌词或封面内容**。软件本身不含任何音频资源，客户端展示的曲库全部来自使用者自行搭建的服务器；音乐、歌词、封面均由使用者自行导入，使用者应确保相关内容来源合法并拥有相应使用权。因使用本软件播放或传播未经授权内容而产生的法律责任，由使用者自行承担。
