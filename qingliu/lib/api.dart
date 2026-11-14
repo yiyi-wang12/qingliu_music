@@ -141,11 +141,17 @@ class MusicApi {
     }
   }
 
-  Future<LoginResult> login(String username, String password) async {
-    final data = await _send('POST', '/api/login', body: {
-      'username': username,
-      'password': password,
-    });
+  Future<LoginResult> login(
+    String username,
+    String password, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    final data = await _send('POST', '/api/login',
+        timeout: timeout,
+        body: {
+          'username': username,
+          'password': password,
+        });
     final newToken = data['token']?.toString();
     if (newToken == null || newToken.isEmpty) {
       throw ApiException('服务器返回的登录凭证无效');
@@ -206,6 +212,35 @@ class MusicApi {
   Future<List<String>> toggleFavorite(String songId) async {
     final data = await _send('POST', '/api/favorites/toggle', body: {'song_id': songId});
     return (data['favorites'] as List?)?.map((e) => e.toString()).toList() ?? <String>[];
+  }
+
+  /// 上报听歌时长。服务端按 6 秒一个单位累计，遇到没记录的 song_id 自动建条目。
+  ///
+  /// 调用方已经攒好批量的单位数，这里一次发一批，不逐单位打请求。
+  /// 歌曲时长和次数都不上报——次数由榜单页用曲库时长现算。
+  Future<void> reportListening(
+    String songId, {
+    required int units,
+    String name = '',
+    String artist = '',
+  }) async {
+    if (units <= 0 || songId.isEmpty) return;
+    await _send(
+      'POST',
+      '/api/listening/report',
+      body: {
+        'song_id': songId,
+        'units': units,
+        'name': name,
+        'artist': artist,
+      },
+      timeout: const Duration(seconds: 8),
+    );
+  }
+
+  Future<ListeningStats> fetchListening() async {
+    final data = await _send('GET', '/api/listening');
+    return ListeningStats.fromJson(data);
   }
 
   /// 批量收藏 / 取消收藏。

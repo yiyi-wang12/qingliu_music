@@ -26,6 +26,8 @@ class _LoginPageState extends State<LoginPage> {
     _server = TextEditingController(text: app.serverUrl);
     _user = TextEditingController(text: app.username);
     _pwd = TextEditingController(text: app.password);
+    // 启动时自动登录失败（且没有可用的本地曲库）会把原因留在这里
+    _error = app.bootError;
   }
 
   @override

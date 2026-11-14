@@ -1,6 +1,6 @@
 # 清流音乐
 
-局域网音乐播放器。Windows 上跑一个单文件 Python 服务端扫描本机音乐，安卓端用 Flutter 播放，带歌词滚动、封面、收藏、歌单和离线缓存。
+局域网音乐播放器。Windows 上跑一个单文件 Python 服务端扫描本机音乐，安卓端用 Flutter 播放，带歌词滚动、封面、收藏、歌单、离线缓存和听歌时长统计。
 
 服务端只用 Python 标准库，**不需要 pip install**；客户端是标准 Flutter 工程，可直接构建 APK。
 
@@ -23,6 +23,7 @@
 │  ├─ setting.json         首次运行自动生成（含签名密钥，不入库）
 │  ├─ user.json            账号，PBKDF2-SHA256 加盐哈希（不入库）
 │  ├─ library.json         收藏与歌单（不入库）
+│  ├─ listening.json       听歌时长，明文 JSON，按 6 秒一个单位（不入库）
 │  ├─ music/               音乐目录，递归扫描（内容不入库）
 │  ├─ lrc/                 歌词目录（内容不入库）
 │  └─ images/              封面目录（内容不入库）
@@ -143,8 +144,12 @@ images/周杰伦/夜曲.jpg     与 music 子目录结构对应
 | POST | `/api/playlists/<pid>/songs/remove` | `{song_ids: [...]}` 批量移除，不在的跳过 |
 | POST | `/api/playlists/<pid>/order` | `{songs: [id...]}` 保存歌单顺序 |
 | DELETE | `/api/playlists/<pid>/songs/<sid>` | 移出单曲 |
+| GET | `/api/listening` | 听歌时长排行榜：总单位、总秒数、各曲时长（时长在请求时按当前曲库现算，不落盘） |
+| POST | `/api/listening/report` | `{song_id, units, name, artist}`，新歌自动建条目 |
 
 顺序接口只接受列表里已有的歌，漏掉的补在末尾，不会因为少传就丢数据。
+
+听歌时长只落累计单位（1 单位 = 6 秒）；收听次数不存储，客户端打开榜单时用当前曲库的歌曲时长现算。
 
 ### 网络
 

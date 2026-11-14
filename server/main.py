@@ -11,6 +11,7 @@
     setting.json     端口等配置（首次运行自动生成）
     user.json        用户账号（pbkdf2 哈希，首次运行生成默认账号）
     library.json     收藏 / 歌单（首次运行自动生成）
+    listening.json   听歌时长（明文 JSON，按 6 秒一个单位累计）
     music/           音乐文件（递归扫描）
     lrc/             歌词文件（递归扫描）
     images/          封面图片（递归扫描，按歌曲名匹配）
@@ -38,6 +39,8 @@
     POST /api/playlists/<pid>/songs/batch     {song_ids: [...]}
     POST /api/playlists/<pid>/songs/remove    {song_ids: [...]}
     DELETE /api/playlists/<pid>/songs/<sid>
+    GET  /api/listening                听歌时长排行榜
+    POST /api/listening/report         {song_id, units, name, artist}
 """
 
 import base64
@@ -60,6 +63,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTING_FILE = os.path.join(BASE_DIR, "setting.json")
 USER_FILE = os.path.join(BASE_DIR, "user.json")
 LIBRARY_FILE = os.path.join(BASE_DIR, "library.json")
+LISTENING_FILE = os.path.join(BASE_DIR, "listening.json")
+
+# 听歌时长的计量单位：客户端每放满 6 秒记 1 个单位。
+# 存的永远是整数单位，换成秒 / 分钟由读取方乘。
+LISTENING_UNIT_SECONDS = 6
 
 AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus",
               ".wav", ".wma", ".ape", ".alac", ".aiff", ".aif", ".m4b"}
@@ -81,6 +89,8 @@ DEFAULT_USER = "admin"
 DEFAULT_PASSWORD = "admin123"
 
 _lock = threading.Lock()
+# 听歌时长单独上锁：上报是高频写，别和收藏 / 歌单抢同一把锁
+_listening_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------
@@ -377,6 +387,63 @@ def user_library(data, username):
 
 
 # --------------------------------------------------------------------------
+# 听歌时长
+# --------------------------------------------------------------------------
+#
+# listening.json 明文结构（按用户分开，和 library.json 一致）：
+#
+#   {
+#     "unit_seconds": 6,
+#     "users": {
+#       "admin": {
+#         "songs": {
+#           "<song_id>": {"name": "...", "artist": "...", "units": 11}
+#         }
+#       }
+#     }
+#   }
+#
+# 只存整数单位，秒数 = units * unit_seconds。歌曲名和歌手跟着记录一起存，
+# 歌被删掉之后排行榜里照样认得出来。次数不落库——客户端打开榜单时用
+# 当时曲库里的歌曲时长现算。
+
+def load_listening():
+    data = _read_json(LISTENING_FILE, None)
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("users"), dict):
+        data["users"] = {}
+    data["unit_seconds"] = LISTENING_UNIT_SECONDS
+    return data
+
+
+def save_listening(data):
+    data["unit_seconds"] = LISTENING_UNIT_SECONDS
+    # 老版本把歌曲时长也写进记录里，现在次数改由客户端现算。
+    # 每次落盘顺手清掉，历史记录也跟着干净。
+    users = data.get("users")
+    if isinstance(users, dict):
+        for bucket in users.values():
+            songs = bucket.get("songs") if isinstance(bucket, dict) else None
+            if not isinstance(songs, dict):
+                continue
+            for entry in songs.values():
+                if isinstance(entry, dict):
+                    entry.pop("duration", None)
+    _write_json(LISTENING_FILE, data)
+
+
+def user_listening(data, username):
+    bucket = data["users"].get(username)
+    if not isinstance(bucket, dict):
+        bucket = {}
+    if not isinstance(bucket.get("songs"), dict):
+        bucket["songs"] = {}
+    data["users"][username] = bucket
+    return bucket
+
+
+# --------------------------------------------------------------------------
 # 令牌
 # --------------------------------------------------------------------------
 
@@ -570,6 +637,305 @@ def guess_from_filename(name):
     return {"title": stem.strip() or name}
 
 
+# --------------------------------------------------------------------------
+# 时长探测：不同容器各有一套头，光读 ID3 时长（TLEN）覆盖不到一半格式。
+# 这里只回答一个问题——这首歌多少秒。解析不出就返回 0，由调用方兜底。
+# --------------------------------------------------------------------------
+
+_MP3_BITRATE_V1_L3 = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128,
+                      160, 192, 224, 256, 320, 0)
+_MP3_BITRATE_V2_L3 = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80,
+                      96, 112, 128, 144, 160, 0)
+_MP3_RATES = ((44100, 48000, 32000),   # MPEG 1
+              (22050, 24000, 16000),   # MPEG 2
+              (11025, 12000, 8000))    # MPEG 2.5
+
+
+def _mp3_frame_header(head, pos):
+    """解析一个 MPEG 音频帧头，返回 (比特率kbps, 采样率, 每帧样本数, 帧长) 。"""
+    if pos + 4 > len(head):
+        return None
+    b1, b2, b3 = head[pos + 1], head[pos + 2], head[pos + 3]
+    if head[pos] != 0xFF or (b1 & 0xE0) != 0xE0:
+        return None
+    version_bits = (b1 >> 3) & 0x03   # 3=MPEG1 2=MPEG2 0=MPEG2.5
+    layer_bits = (b1 >> 1) & 0x03     # 1=Layer3
+    if version_bits == 1 or layer_bits != 1:
+        return None
+    rate_idx = (b2 >> 2) & 0x03
+    if rate_idx == 3:
+        return None
+    table = _MP3_RATES[0] if version_bits == 3 else (
+        _MP3_RATES[1] if version_bits == 2 else _MP3_RATES[2])
+    rate = table[rate_idx]
+    bitrate_idx = (b2 >> 4) & 0x0F
+    bitrates = _MP3_BITRATE_V1_L3 if version_bits == 3 else _MP3_BITRATE_V2_L3
+    bitrate = bitrates[bitrate_idx]
+    if not rate or not bitrate:
+        return None
+    spf = 1152 if version_bits == 3 else 576
+    pad = (b2 >> 1) & 0x01
+    mono = ((b3 >> 6) & 0x03) == 3
+    frame_len = int(spf / 8.0 * 1000.0 * bitrate / rate) + pad
+    return bitrate, rate, spf, frame_len
+
+
+def _mp3_duration(path, size):
+    try:
+        with open(path, "rb") as f:
+            start = 0
+            head = f.read(10)
+            if len(head) == 10 and head[:3] == b"ID3":
+                start = _syncsafe(head[6:10]) + 10
+                if head[5] & 0x10:
+                    start += 10          # 带 footer
+            f.seek(start)
+            block = f.read(4096)
+    except OSError:
+        return 0
+    for off in range(0, min(len(block) - 4, 2048)):
+        parsed = _mp3_frame_header(block, off)
+        if not parsed:
+            continue
+        bitrate, rate, spf, frame_len = parsed
+        if frame_len <= 4:
+            continue
+        # 有 Xing/Info 头就直接拿帧数，VBR 也算得准。
+        # side info 长度跟 MPEG 版本、单双声道有关，算错了会找不到 Xing
+        version_bits = (block[off + 1] >> 3) & 0x03
+        mono = (block[off + 3] >> 6) == 0x03
+        if version_bits == 3:
+            side = 17 if mono else 32
+        else:
+            side = 9 if mono else 17
+        tag_pos = off + 4 + side
+        if block[tag_pos:tag_pos + 4] in (b"Xing", b"Info"):
+            flags = int.from_bytes(block[tag_pos + 4:tag_pos + 8], "big")
+            if flags & 0x01:
+                frames = int.from_bytes(block[tag_pos + 8:tag_pos + 12], "big")
+                if frames > 0:
+                    return frames * spf / float(rate)
+        # 没有 Xing：按首帧码率当 CBR 估，误差通常在零点几个百分点
+        audio = max(0, size - start - off)
+        return audio * 8.0 / (bitrate * 1000.0)
+    return 0
+
+
+def _ogg_duration(path, size):
+    """Ogg 的时长在最后一页的 granule 里，单位是采样数。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+            rate = 0
+            preskip = 0
+            pos = head.find(b"\x01vorbis")
+            if pos >= 0 and pos + 16 <= len(head):
+                rate = int.from_bytes(head[pos + 12:pos + 16], "little")
+            else:
+                pos = head.find(b"OpusHead")
+                if pos >= 0 and pos + 12 <= len(head):
+                    preskip = int.from_bytes(head[pos + 10:pos + 12], "little")
+                    rate = 48000            # Opus 的 granule 恒按 48k 计
+                else:
+                    pos = head.find(b"Speex   ")
+                    if pos >= 0 and pos + 40 <= len(head):
+                        rate = int.from_bytes(head[pos + 36:pos + 40], "little")
+            if rate <= 0:
+                return 0
+            tail_len = min(size, 131072)
+            f.seek(size - tail_len)
+            tail = f.read(tail_len)
+    except OSError:
+        return 0
+    pos = tail.rfind(b"OggS")
+    while pos >= 0:
+        if pos + 14 <= len(tail):
+            granule = int.from_bytes(tail[pos + 6:pos + 14], "little")
+            # 0xFFFF... 表示这页不含完整包，往前再找
+            if granule not in (0, 0xFFFFFFFFFFFFFFFF):
+                if preskip and granule > preskip:
+                    granule -= preskip
+                return granule / float(rate)
+        pos = tail.rfind(b"OggS", 0, pos)
+    return 0
+
+
+def _wav_duration(path, size):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+            if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                return 0
+            byte_rate = 0
+            data_size = 0
+            while byte_rate <= 0 or data_size <= 0:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                cid = hdr[:4]
+                clen = int.from_bytes(hdr[4:8], "little")
+                if cid == b"fmt ":
+                    fmt = f.read(clen)
+                    if len(fmt) >= 12:
+                        byte_rate = int.from_bytes(fmt[8:12], "little")
+                    f.seek(clen & 1, os.SEEK_CUR)
+                elif cid == b"data":
+                    if clen in (0, 0xFFFFFFFF):
+                        cur = f.tell()
+                        f.seek(0, os.SEEK_END)
+                        clen = f.tell() - cur
+                        f.seek(cur)
+                    data_size = clen
+                    f.seek(clen + (clen & 1), os.SEEK_CUR)
+                else:
+                    f.seek(clen + (clen & 1), os.SEEK_CUR)
+    except OSError:
+        return 0
+    if byte_rate <= 0 or data_size <= 0:
+        return 0
+    return data_size / float(byte_rate)
+
+
+def _mp4_duration(path, size):
+    """m4a / m4b / alac：走一遍 moov -> mvhd，时长和采样率都在里面。"""
+    try:
+        with open(path, "rb") as f:
+            while True:
+                start = f.tell()
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    return 0
+                blen = int.from_bytes(hdr[0:4], "big")
+                btyp = hdr[4:8]
+                header = 8
+                if blen == 1:
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        return 0
+                    blen = int.from_bytes(ext, "big")
+                    header = 16
+                elif blen == 0:
+                    blen = size - start
+                if blen < header:
+                    return 0
+                if btyp == b"moov":
+                    payload = f.read(min(blen - header, 8 * 1024 * 1024))
+                    pos = payload.find(b"mvhd")
+                    if pos < 0 or pos + 24 > len(payload):
+                        return 0
+                    version = payload[pos + 4]
+                    if version == 1:
+                        if pos + 36 > len(payload):
+                            return 0
+                        timescale = int.from_bytes(payload[pos + 24:pos + 28], "big")
+                        duration = int.from_bytes(payload[pos + 28:pos + 36], "big")
+                    else:
+                        timescale = int.from_bytes(payload[pos + 16:pos + 20], "big")
+                        duration = int.from_bytes(payload[pos + 20:pos + 24], "big")
+                    if timescale <= 0:
+                        return 0
+                    return duration / float(timescale)
+                f.seek(start + blen)
+    except OSError:
+        return 0
+
+
+def _aac_duration(path, size):
+    """裸 AAC（ADTS）：数帧，每帧 1024 个样本。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(min(size, 64 * 1024 * 1024))
+    except OSError:
+        return 0
+    pos = 0
+    frames = 0
+    rate = 0
+    rates = (96000, 88200, 64000, 48000, 44100, 32000, 24000,
+             22050, 16000, 12000, 11025, 8000, 7350)
+    while pos + 7 <= len(data):
+        if data[pos] != 0xFF or (data[pos + 1] & 0xF0) != 0xF0:
+            pos += 1
+            continue
+        rate_idx = (data[pos + 2] >> 2) & 0x0F
+        if rate_idx >= len(rates):
+            pos += 1
+            continue
+        rate = rates[rate_idx]
+        frame_len = ((data[pos + 3] & 0x03) << 11) | (data[pos + 4] << 3) | (
+            data[pos + 5] >> 5)
+        if frame_len < 7:
+            pos += 1
+            continue
+        blocks = (data[pos + 6] & 0x03) + 1
+        frames += blocks
+        pos += frame_len
+    if rate <= 0 or frames <= 0:
+        return 0
+    return frames * 1024.0 / rate
+
+
+def _aiff_duration(path, size):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+            if len(head) < 12 or head[:4] != b"FORM":
+                return 0
+            while True:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    return 0
+                cid = hdr[:4]
+                clen = int.from_bytes(hdr[4:8], "big")
+                if cid == b"COMM":
+                    body = f.read(clen)
+                    if len(body) < 18:
+                        return 0
+                    frames = int.from_bytes(body[2:6], "big")
+                    rate = _extended80(body[8:18])
+                    if rate <= 0:
+                        return 0
+                    return frames / rate
+                f.seek(clen + (clen & 1), os.SEEK_CUR)
+    except OSError:
+        return 0
+
+
+def _extended80(raw):
+    """80 位扩展精度浮点（AIFF 的采样率就是它）。"""
+    if len(raw) < 10:
+        return 0.0
+    exponent = ((raw[0] & 0x7F) << 8) | raw[1]
+    mantissa = int.from_bytes(raw[2:10], "big")
+    if exponent == 0 and mantissa == 0:
+        return 0.0
+    value = mantissa * (2.0 ** (exponent - 16383 - 63))
+    return -value if raw[0] & 0x80 else value
+
+
+def probe_duration(path):
+    """只算时长。返回秒数，算不出返回 0。"""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    if size <= 0:
+        return 0
+    if ext in (".mp3", ".wma", ".ape"):
+        return _mp3_duration(path, size) if ext == ".mp3" else 0
+    if ext in (".ogg", ".opus", ".oga"):
+        return _ogg_duration(path, size)
+    if ext == ".wav":
+        return _wav_duration(path, size)
+    if ext in (".m4a", ".m4b", ".alac", ".mp4"):
+        return _mp4_duration(path, size)
+    if ext == ".aac":
+        return _aac_duration(path, size)
+    if ext in (".aiff", ".aif"):
+        return _aiff_duration(path, size)
+    return 0
+
+
 def read_tags(path):
     ext = os.path.splitext(path)[1].lower()
     tags = {}
@@ -589,6 +955,11 @@ def read_tags(path):
             tags["duration"] = round(int(tags["length"]) / 1000.0, 2)
         except ValueError:
             pass
+    # 标签里没有时长（flac 以外的容器基本都没有）：按容器头自己算
+    if not tags.get("duration"):
+        guess = probe_duration(path)
+        if guess > 0:
+            tags["duration"] = round(guess, 2)
     return tags
 
 
@@ -1049,6 +1420,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.library_payload(username))
                 return
 
+            if path == "/api/listening":
+                username = self.require_user(query)
+                if not username:
+                    return
+                self.handle_listening_list(username)
+                return
+
+            if path == "/api/listening/report" and method == "POST":
+                self.handle_listening_report()
+                return
+
             if path == "/api/favorites/toggle" and method == "POST":
                 self.handle_favorite_toggle()
                 return
@@ -1363,6 +1745,117 @@ class Handler(BaseHTTPRequestHandler):
                 "favorites": list(bucket.get("favorites", [])),
                 "playlists": list(bucket.get("playlists", [])),
             }
+
+    # ---------------- 听歌时长 ----------------
+
+    def _listening_name(self, sid, body):
+        """歌曲名 / 歌手。曲库里有就以曲库为准，客户端传的只作兜底。
+
+        时长不存：次数在客户端打开榜单时用当时曲库的时长现算。
+        """
+        name = str(body.get("name") or "").strip()
+        artist = str(body.get("artist") or "").strip()
+        song = self.library.get(sid)
+        if song:
+            name = str(song.get("name") or "").strip() or name
+            artist = str(song.get("artist") or "").strip() or artist
+        return name or sid, artist or "未知艺术家"
+
+    def handle_listening_report(self):
+        """客户端每放满 6 秒攒 1 个单位，攒几个就报几个。
+
+        榜上还没有这首歌时自动建条目，不用服务端预先扫一遍曲库。
+        只累计时间单位，次数不落库。
+        """
+        username = self.require_user()
+        if not username:
+            return
+        body = self.json_body()
+        sid = str(body.get("song_id") or "").strip()
+        if not sid:
+            self.send_error_json("缺少 song_id", 400)
+            return
+        try:
+            units = int(body.get("units") or 0)
+        except (TypeError, ValueError):
+            units = 0
+        if units <= 0:
+            self.send_error_json("units 必须大于 0", 400)
+            return
+        # 异常值挡一下：一次最多收 24 小时，防止客户端算错把榜单写飞
+        units = min(units, 24 * 3600 // LISTENING_UNIT_SECONDS)
+
+        name, artist = self._listening_name(sid, body)
+
+        with _listening_lock:
+            data = load_listening()
+            songs = user_listening(data, username)["songs"]
+            entry = songs.get(sid)
+            if not isinstance(entry, dict):
+                entry = {"name": name, "artist": artist, "units": 0}
+                songs[sid] = entry
+            else:
+                # 曲库改名 / 换文件后跟着更新，旧记录不至于一直挂着老名字
+                entry["name"] = name
+                entry["artist"] = artist
+            # 老版本存过 duration，顺手清掉：次数改由客户端现算
+            entry.pop("duration", None)
+            entry["units"] = int(entry.get("units") or 0) + units
+            save_listening(data)
+            total = entry["units"]
+
+        self.send_json({"ok": True, "song_id": sid, "units": total,
+                        "unit_seconds": LISTENING_UNIT_SECONDS})
+
+    def handle_listening_list(self, username):
+        """听歌时长排行榜：按时长从多到少。
+
+        记录里只存单位数，歌曲时长在**这次请求时**从当前曲库取来一起返回，
+        次数由客户端用 seconds / duration 现算。这样换文件、改标签、补上
+        时长解析之后，榜单上的次数立刻正确，不用等下次播放重写记录。
+        """
+        with _listening_lock:
+            data = load_listening()
+            songs = user_listening(data, username)["songs"]
+
+        items = []
+        total_units = 0
+        for sid, entry in songs.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                units = int(entry.get("units") or 0)
+            except (TypeError, ValueError):
+                units = 0
+            if units <= 0:
+                continue
+            total_units += units
+            # 曲库里有这首就带上时长；歌被删了给 0，客户端自己决定怎么显示
+            duration = 0.0
+            meta = self.library.get(sid)
+            if meta:
+                try:
+                    duration = float(meta.get("duration") or 0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+            items.append({
+                "id": sid,
+                "name": str(entry.get("name") or sid),
+                "artist": str(entry.get("artist") or "未知艺术家"),
+                "duration": duration,
+                "units": units,
+                "seconds": units * LISTENING_UNIT_SECONDS,
+            })
+
+        items.sort(key=lambda s: (-s["units"], s["name"].lower()))
+        self.send_json({
+            "ok": True,
+            "username": username,
+            "unit_seconds": LISTENING_UNIT_SECONDS,
+            "total_units": total_units,
+            "total_seconds": total_units * LISTENING_UNIT_SECONDS,
+            "songs": items,
+        })
 
     def handle_favorite_toggle(self):
         username = self.require_user()

@@ -8,6 +8,7 @@ import '../app_state.dart';
 import '../cache_service.dart';
 import '../models.dart';
 import '../player_controller.dart';
+import '../screen_keep_on.dart';
 import '../widgets/cover_art.dart';
 import '../widgets/liquid_glass.dart';
 import '../widgets/song_tile.dart';
@@ -30,8 +31,19 @@ class _PlayerPageState extends State<PlayerPage> {
   double _scrollPad = 0;
   double _scrollFontSize = 0;
 
+  /// 上一次是不是横屏：切换方向后要把当前歌词行重新摆到正中。
+  bool? _landscape;
+
+  @override
+  void initState() {
+    super.initState();
+    // 盯着歌词看的时候别让屏幕自己灭
+    ScreenKeepOn.acquire();
+  }
+
   @override
   void dispose() {
+    ScreenKeepOn.release();
     _scroll.dispose();
     super.dispose();
   }
@@ -60,8 +72,17 @@ class _PlayerPageState extends State<PlayerPage> {
       cached.readAsBytes().then((bytes) {
         _applyLyric(song.id, utf8.decode(bytes, allowMalformed: true));
       }).catchError((_) {
-        player.api?.fetchLyric(song.id).then((text) => _applyLyric(song.id, text));
+        if (player.offline) {
+          _applyLyric(song.id, null);
+        } else {
+          player.api?.fetchLyric(song.id).then((text) => _applyLyric(song.id, text));
+        }
       });
+      return;
+    }
+    // 离线又没有本地歌词：不发请求，也不转那个 10 秒的圈
+    if (player.offline) {
+      _applyLyric(song.id, null);
       return;
     }
     player.api?.fetchLyric(song.id).then((text) => _applyLyric(song.id, text));
@@ -185,7 +206,6 @@ class _PlayerPageState extends State<PlayerPage> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final player = context.watch<PlayerController>();
-    final theme = Theme.of(context);
     final song = player.current;
 
     if (song != null && song.id != _lyricSongId) {
@@ -208,77 +228,193 @@ class _PlayerPageState extends State<PlayerPage> {
 
     final favorite = context.select<AppState, bool>((a) => a.isFavorite(song.id));
     final glass = app.glassEffect;
+    final landscape = MediaQuery.orientationOf(context) == Orientation.landscape;
+
+    // 横竖屏一换视口高度就变了，把当前行重新摆到正中
+    if (_landscape != null && _landscape != landscape) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToLine(_currentLine, _scrollPad);
+      });
+    }
+    _landscape = landscape;
 
     return GlassPage(
       enabled: glass,
       child: Scaffold(
         backgroundColor: glass ? Colors.transparent : null,
-        appBar: AppBar(
-          backgroundColor: glass ? Colors.transparent : null,
-          scrolledUnderElevation: glass ? 0 : 0.5,
-          leading: IconButton(
-            icon: const Icon(Icons.keyboard_arrow_down),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          title: const Text('正在播放', style: TextStyle(fontSize: 15)),
-          centerTitle: true,
-          actions: [
-            IconButton(
-              icon: Icon(
-                favorite ? Icons.favorite : Icons.favorite_border,
-                color: favorite ? theme.colorScheme.primary : null,
-              ),
-              onPressed: () => app.toggleFavorite(song.id),
-            ),
-          ],
-        ),
+        // 横屏高度本来就紧，标题栏省掉，返回键挪进左栏
+        appBar: landscape ? null : _appBar(context, app, song, favorite),
         body: SafeArea(
+          child: landscape
+              ? _buildLandscape(context, app, player, song, favorite)
+              : _buildPortrait(context, app, player, song),
+        ),
+      ),
+    );
+  }
+
+  PreferredSizeWidget _appBar(
+    BuildContext context,
+    AppState app,
+    Song song,
+    bool favorite,
+  ) {
+    final theme = Theme.of(context);
+    final glass = app.glassEffect;
+    return AppBar(
+      backgroundColor: glass ? Colors.transparent : null,
+      scrolledUnderElevation: glass ? 0 : 0.5,
+      leading: IconButton(
+        icon: const Icon(Icons.keyboard_arrow_down),
+        onPressed: () => Navigator.of(context).pop(),
+      ),
+      title: const Text('正在播放', style: TextStyle(fontSize: 15)),
+      centerTitle: true,
+      actions: [
+        IconButton(
+          icon: Icon(
+            favorite ? Icons.favorite : Icons.favorite_border,
+            color: favorite ? theme.colorScheme.primary : null,
+          ),
+          onPressed: () => app.toggleFavorite(song.id),
+        ),
+      ],
+    );
+  }
+
+  /// 竖屏：封面在上，歌词在下。
+  Widget _buildPortrait(
+    BuildContext context,
+    AppState app,
+    PlayerController player,
+    Song song,
+  ) {
+    final theme = Theme.of(context);
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: AspectRatio(
+            aspectRatio: 1,
+            child: CoverArt(song: song, radius: 20, iconSize: 88),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             children: [
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: AspectRatio(
-                  aspectRatio: 1,
-                  child: CoverArt(song: song, radius: 20, iconSize: 88),
+              Text(
+                song.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                song.subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-              const SizedBox(height: 20),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Column(
-                  children: [
-                    Text(
-                      song.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 19, fontWeight: FontWeight.w700),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      song.subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              Expanded(
-                child: _buildLyric(context, app, player),
-              ),
-              _buildProgress(context, player),
-              _buildControls(context, app, player),
-              const SizedBox(height: 12),
             ],
           ),
         ),
-      ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: _buildLyric(context, app, player),
+        ),
+        _buildProgress(context, player),
+        _buildControls(context, app, player),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
+
+  /// 横屏：左半边封面与控制，右半边歌词。
+  Widget _buildLandscape(
+    BuildContext context,
+    AppState app,
+    PlayerController player,
+    Song song,
+    bool favorite,
+  ) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 4, 6),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.keyboard_arrow_down),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(
+                        favorite ? Icons.favorite : Icons.favorite_border,
+                        color:
+                            favorite ? theme.colorScheme.primary : null,
+                      ),
+                      onPressed: () => app.toggleFavorite(song.id),
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: CoverArt(song: song, radius: 18, iconSize: 64),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  song.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  song.subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                _buildProgress(context, player, horizontal: 4, compact: true),
+                _buildControls(context, app, player,
+                    horizontal: 4, playSize: 54),
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(4, 8, 12, 10),
+            child: _buildLyric(context, app, player),
+          ),
+        ),
+      ],
     );
   }
 
@@ -450,7 +586,12 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  Widget _buildProgress(BuildContext context, PlayerController player) {
+  Widget _buildProgress(
+    BuildContext context,
+    PlayerController player, {
+    double horizontal = 20,
+    bool compact = false,
+  }) {
     final theme = Theme.of(context);
     return StreamBuilder<Duration?>(
       stream: player.durationStream,
@@ -466,30 +607,33 @@ class _PlayerPageState extends State<PlayerPage> {
                     ? position.inMilliseconds.toDouble().clamp(0.0, maxMs).toDouble()
                     : 0.0);
             return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
+              padding: EdgeInsets.symmetric(horizontal: horizontal),
               child: Column(
                 children: [
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 2.5,
-                      thumbShape:
-                          const RoundSliderThumbShape(enabledThumbRadius: 6),
-                      overlayShape:
-                          const RoundSliderOverlayShape(overlayRadius: 16),
-                    ),
-                    child: Slider(
-                      value: value,
-                      max: maxMs > 0 ? maxMs : 1,
-                      onChanged: maxMs > 0
-                          ? (v) => setState(() => _dragValue = v)
-                          : null,
-                      onChangeEnd: maxMs > 0
-                          ? (v) {
-                              player.seek(
-                                  Duration(milliseconds: v.round()));
-                              setState(() => _dragValue = null);
-                            }
-                          : null,
+                  SizedBox(
+                    height: compact ? 26 : null,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 2.5,
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 6),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 16),
+                      ),
+                      child: Slider(
+                        value: value,
+                        max: maxMs > 0 ? maxMs : 1,
+                        onChanged: maxMs > 0
+                            ? (v) => setState(() => _dragValue = v)
+                            : null,
+                        onChangeEnd: maxMs > 0
+                            ? (v) {
+                                player.seek(
+                                    Duration(milliseconds: v.round()));
+                                setState(() => _dragValue = null);
+                              }
+                            : null,
+                      ),
                     ),
                   ),
                   Padding(
@@ -525,8 +669,15 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Widget _buildControls(
-      BuildContext context, AppState app, PlayerController player) {
+    BuildContext context,
+    AppState app,
+    PlayerController player, {
+    double horizontal = 24,
+    double playSize = 64,
+  }) {
     final theme = Theme.of(context);
+    final iconSize = playSize * 0.53;
+    final smallSize = playSize * 0.34;
 
     IconData modeIcon;
     String modeLabel;
@@ -545,13 +696,13 @@ class _PlayerPageState extends State<PlayerPage> {
     }
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: EdgeInsets.symmetric(horizontal: horizontal),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
             tooltip: modeLabel,
-            icon: Icon(modeIcon, size: 22),
+            icon: Icon(modeIcon, size: smallSize),
             color: theme.colorScheme.primary,
             onPressed: () {
               const order = ['list', 'one', 'shuffle'];
@@ -560,7 +711,7 @@ class _PlayerPageState extends State<PlayerPage> {
             },
           ),
           IconButton(
-            icon: const Icon(Icons.skip_previous, size: 34),
+            icon: Icon(Icons.skip_previous, size: iconSize),
             onPressed: () => player.previous(),
           ),
           StreamBuilder<PlayerState>(
@@ -571,8 +722,8 @@ class _PlayerPageState extends State<PlayerPage> {
                   (state.processingState == ProcessingState.loading ||
                       state.processingState == ProcessingState.buffering);
               return SizedBox(
-                width: 64,
-                height: 64,
+                width: playSize,
+                height: playSize,
                 child: Material(
                   color: theme.colorScheme.primary,
                   shape: const CircleBorder(),
@@ -581,10 +732,10 @@ class _PlayerPageState extends State<PlayerPage> {
                     onTap: () => player.toggle(),
                     child: Center(
                       child: loading
-                          ? const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
+                          ? SizedBox(
+                              width: smallSize,
+                              height: smallSize,
+                              child: const CircularProgressIndicator(
                                 strokeWidth: 2.2,
                                 color: Colors.white,
                               ),
@@ -593,7 +744,7 @@ class _PlayerPageState extends State<PlayerPage> {
                               (state?.playing ?? false)
                                   ? Icons.pause
                                   : Icons.play_arrow,
-                              size: 34,
+                              size: iconSize,
                               color: Colors.white,
                             ),
                     ),
@@ -603,11 +754,11 @@ class _PlayerPageState extends State<PlayerPage> {
             },
           ),
           IconButton(
-            icon: const Icon(Icons.skip_next, size: 34),
+            icon: Icon(Icons.skip_next, size: iconSize),
             onPressed: () => player.next(),
           ),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.queue_music, size: 22),
+            icon: Icon(Icons.queue_music, size: smallSize),
             tooltip: '播放列表',
             onSelected: (value) async {
               if (value == 'add') {

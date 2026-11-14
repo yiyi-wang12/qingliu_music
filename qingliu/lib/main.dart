@@ -3,10 +3,16 @@ import 'package:provider/provider.dart';
 
 import 'app_state.dart';
 import 'cache_service.dart';
+import 'models.dart';
 import 'pages/login_page.dart';
 import 'pages/shell_page.dart';
 import 'player_controller.dart';
 import 'theme.dart';
+import 'widgets/offline_notice.dart';
+
+/// 播放器在离线时会撞到「没有本地缓存」，提示窗要从这里往外弹，
+/// 因为触发点可能不在任何页面的 context 里（通知栏按钮、自动连播）。
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,14 +30,45 @@ void main() {
   );
 }
 
-class MusicApp extends StatelessWidget {
+class MusicApp extends StatefulWidget {
   const MusicApp({super.key});
+
+  @override
+  State<MusicApp> createState() => _MusicAppState();
+}
+
+class _MusicAppState extends State<MusicApp> {
+  late final PlayerController _player;
+  bool _offlineDialog = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = context.read<PlayerController>();
+    _player.onOfflineMiss = _notifyOfflineMiss;
+  }
+
+  @override
+  void dispose() {
+    _player.onOfflineMiss = null;
+    super.dispose();
+  }
+
+  /// 离线又没有本地缓存：弹一次窗，连点切歌不叠一摞。
+  void _notifyOfflineMiss(Song song) {
+    final context = appNavigatorKey.currentContext;
+    if (context == null || !context.mounted || _offlineDialog) return;
+    _offlineDialog = true;
+    showOfflineNotice(context, songName: song.name)
+        .whenComplete(() => _offlineDialog = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final seed = Color(app.themeSeed);
     return MaterialApp(
+      navigatorKey: appNavigatorKey,
       title: '清流音乐',
       debugShowCheckedModeBanner: false,
       theme: _theme(seed, Brightness.light, app.glassEffect),

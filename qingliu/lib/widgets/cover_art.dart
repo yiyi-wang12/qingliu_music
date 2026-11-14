@@ -39,7 +39,9 @@ class CoverArt extends StatelessWidget {
       );
     } else {
       final api = context.read<AppState>().api;
-      if (song.hasCover && api != null) {
+      // 离线时服务器连不上，网络封面只会白等超时，直接给占位
+      final offline = context.select<AppState, bool>((a) => a.offline);
+      if (song.hasCover && api != null && !offline) {
         content = Image.network(
           api.coverUrl(song.id),
           fit: BoxFit.cover,

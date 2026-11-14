@@ -6,6 +6,7 @@ import '../models.dart';
 import '../player_controller.dart';
 import '../widgets/liquid_glass.dart';
 import '../widgets/song_tile.dart';
+import 'listening_page.dart';
 import 'song_list_page.dart';
 
 class MinePage extends StatelessWidget {
@@ -109,6 +110,26 @@ class MinePage extends StatelessWidget {
             padding: EdgeInsets.zero,
             child: Column(
               children: [
+                ListTile(
+                  leading: Icon(Icons.headphones,
+                      color: theme.colorScheme.primary),
+                  title: const Text('听歌时长'),
+                  subtitle: const Text('排行榜'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ListeningPage(),
+                      ),
+                    );
+                  },
+                ),
+                Divider(
+                  height: 1,
+                  indent: 16,
+                  endIndent: 16,
+                  color: theme.dividerColor.withAlpha(60),
+                ),
                 ListTile(
                   leading: Icon(Icons.favorite,
                       color: theme.colorScheme.primary),

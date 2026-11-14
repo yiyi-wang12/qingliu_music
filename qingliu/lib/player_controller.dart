@@ -10,6 +10,16 @@ import 'chunk_stream.dart';
 import 'media_session.dart';
 import 'models.dart';
 
+/// 离线模式下点到一首没有本地缓存的歌。
+class OfflineNoCacheException implements Exception {
+  const OfflineNoCacheException(this.song);
+
+  final Song song;
+
+  @override
+  String toString() => '未连接服务器，${song.name} 没有本地缓存';
+}
+
 /// 播放队列与控制。
 ///
 /// 一次只给播放器装**一首**歌的音源，播完由这里决定下一首。
@@ -20,6 +30,12 @@ class PlayerController extends ChangeNotifier {
   MusicApi? api;
   CacheService? cache;
   MediaSessionService? media;
+
+  /// 离线模式：只有本地缓存能放，网络音源不去碰。
+  bool offline = false;
+
+  /// 离线又没缓存时的提示出口，由界面层注入（全局弹窗）。
+  void Function(Song song)? onOfflineMiss;
 
   List<Song> queue = [];
   int index = -1;
@@ -94,7 +110,10 @@ class PlayerController extends ChangeNotifier {
     if (_artSongId != song.id) {
       _artSongId = song.id;
       _artPath = cache?.coverFile(song.id)?.path;
-      _artUrl = (song.hasCover && api != null) ? api!.coverUrl(song.id) : null;
+      // 离线时别给通知栏一个抓不到的网络地址，没有本地封面就干脆不给
+      _artUrl = (!offline && song.hasCover && api != null)
+          ? api!.coverUrl(song.id)
+          : null;
     }
     service.update(
       song: song,
@@ -173,6 +192,8 @@ class PlayerController extends ChangeNotifier {
     if (local != null) {
       return AudioSource.uri(Uri.file(local.path));
     }
+    // 离线：服务器都连不上，分块代理和直连都是白等，直接报给界面
+    if (offline) throw OfflineNoCacheException(song);
     final stream = _stream ??= ChunkStreamServer(() => api);
     if (await stream.ensureStarted()) {
       final url = stream.urlFor(song);
@@ -191,6 +212,7 @@ class PlayerController extends ChangeNotifier {
     if (client == null || i < 0 || i >= queue.length) return;
 
     final token = ++_loadToken;
+    final previousIndex = index;
     index = i;
     error = null;
     notifyListeners();
@@ -198,7 +220,7 @@ class PlayerController extends ChangeNotifier {
     syncMedia(position: Duration.zero, duration: Duration.zero);
 
     // 块大小以服务端 setting.json 为准，切歌顺手刷新一次（一分钟内只拉一次）
-    unawaited(client.refreshConfig());
+    if (!offline) unawaited(client.refreshConfig());
 
     try {
       final source = await _sourceFor(queue[i], client);
@@ -208,6 +230,15 @@ class PlayerController extends ChangeNotifier {
       if (autoplay) await _player.play();
     } catch (e) {
       if (token != _loadToken) return;
+      if (e is OfflineNoCacheException) {
+        // 这首放不了：退回上一首，别让界面停在一首没放出来的歌上
+        index = previousIndex;
+        _artSongId = null;
+        notifyListeners();
+        syncMedia();
+        onOfflineMiss?.call(e.song);
+        return;
+      }
       error = '播放失败：$e';
       notifyListeners();
     }
@@ -236,6 +267,8 @@ class PlayerController extends ChangeNotifier {
     final client = api;
     final store = cache;
     if (client == null || song == null || store == null) return;
+    // 离线时下载必然失败，别把队列塞满失败任务
+    if (offline) return;
     if (!store.enabled || store.isCached(song.id)) return;
     unawaited(store.prefetch(
       song,

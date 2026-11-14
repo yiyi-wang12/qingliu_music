@@ -47,6 +47,22 @@ class Song {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'artist': artist,
+        'album': album,
+        'ext': ext,
+        'size': size,
+        'duration': duration,
+        'has_lrc': hasLrc,
+        'has_cover': hasCover,
+        'version': version,
+        'lrc_version': lrcVersion,
+        'cover_version': coverVersion,
+        'folder': folder,
+      };
+
   String get subtitle => album.isEmpty ? artist : '$artist · $album';
 
   bool matches(String query) {
@@ -66,6 +82,12 @@ class Playlist {
 
   const Playlist({required this.id, required this.name, required this.songIds});
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'songs': songIds,
+      };
+
   factory Playlist.fromJson(Map<String, dynamic> json) {
     return Playlist(
       id: json['id']?.toString() ?? '',
@@ -73,6 +95,105 @@ class Playlist {
       songIds: (json['songs'] as List?)?.map((e) => e.toString()).toList() ?? <String>[],
     );
   }
+}
+
+/// 听歌时长榜上的一首歌。
+///
+/// 服务端只存整数单位（默认 1 单位 = 6 秒）和歌名，次数不落库：
+/// 打开榜单时用当前曲库的歌曲时长现算，见 [plays]。
+class ListeningSong {
+  final String id;
+  final String name;
+  final String artist;
+  final int units;
+  final int unitSeconds;
+  final double duration;
+
+  const ListeningSong({
+    required this.id,
+    required this.name,
+    required this.artist,
+    required this.units,
+    this.unitSeconds = 6,
+    this.duration = 0,
+  });
+
+  factory ListeningSong.fromJson(Map<String, dynamic> json, int unitSeconds) {
+    return ListeningSong(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '未知歌曲',
+      artist: json['artist']?.toString() ?? '未知艺术家',
+      units: (json['units'] as num?)?.toInt() ?? 0,
+      unitSeconds: unitSeconds,
+      duration: (json['duration'] as num?)?.toDouble() ?? 0,
+    );
+  }
+
+  /// 听歌秒数：单位数 × 单位长度。
+  double get seconds => units * unitSeconds.toDouble();
+
+  /// 客户端显示单位是分钟。
+  double get minutes => seconds / 60;
+
+  /// 次数 = 听歌时长 / 歌曲时长。
+  ///
+  /// [songDuration] 由页面打开那一刻从当前曲库取，不跟着服务端记录存。
+  /// 不取整：听半首就是 0.5 次。
+  double plays(double songDuration) {
+    if (songDuration <= 0) return 0;
+    return seconds / songDuration;
+  }
+}
+
+/// 一个用户的听歌时长总账。
+class ListeningStats {
+  final int unitSeconds;
+  final int totalUnits;
+  final List<ListeningSong> songs;
+
+  const ListeningStats({
+    required this.unitSeconds,
+    required this.totalUnits,
+    required this.songs,
+  });
+
+  factory ListeningStats.fromJson(Map<String, dynamic> json) {
+    final unitSeconds = (json['unit_seconds'] as num?)?.toInt() ?? 6;
+    final list = (json['songs'] as List?) ?? const [];
+    return ListeningStats(
+      unitSeconds: unitSeconds <= 0 ? 6 : unitSeconds,
+      totalUnits: (json['total_units'] as num?)?.toInt() ?? 0,
+      songs: list
+          .whereType<Map>()
+          .map((e) => ListeningSong.fromJson(
+                Map<String, dynamic>.from(e),
+                unitSeconds <= 0 ? 6 : unitSeconds,
+              ))
+          .toList(),
+    );
+  }
+
+  double get totalMinutes => totalUnits * unitSeconds / 60;
+}
+
+/// 分钟数按 1 位小数显示，整数就不带小数点：1.1 / 12 / 66。
+String formatMinutes(double minutes) => formatOneDecimal(minutes);
+
+/// 次数按 1 位小数显示：0.3 / 1.1 / 4。
+/// 不到 0.1 次显示 `<0.1`，不然刚听十几秒又变成 "0 次"，和白听一样。
+String formatTimes(double value) {
+  if (value <= 0) return '0';
+  if (value < 0.05) return '<0.1';
+  return formatOneDecimal(value);
+}
+
+String formatOneDecimal(double value) {
+  if (value <= 0) return '0';
+  final rounded = (value * 10).round() / 10;
+  if (rounded == rounded.roundToDouble()) {
+    return rounded.toStringAsFixed(0);
+  }
+  return rounded.toStringAsFixed(1);
 }
 
 class LyricLine {
